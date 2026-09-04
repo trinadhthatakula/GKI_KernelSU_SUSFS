@@ -36,15 +36,21 @@ def approved(env):
 
 def read_pins():
     """Return dict {var_name: sha} from the current PIN_* block in main.yml."""
-    with open(MAIN, "r", encoding="utf-8") as fh:
+    with open(MAIN, "r", encoding="utf-8", newline="") as fh:
         text = fh.read()
     pins = {}
     for var, _, _ in PINS:
-        pattern = re.compile(rf'^[ \t]*{re.escape(var)}="([0-9a-f]{{40}})"[ \t]*$', re.MULTILINE)
+        pattern = re.compile(
+            rf'^[ \t]*{re.escape(var)}(?P<assignment>[ \t]*=[^\r\n]*)?[ \t]*(?=\r?$)',
+            re.MULTILINE,
+        )
         matches = list(pattern.finditer(text))
         if len(matches) != 1:
             raise ValueError(f"expected exactly one {var} assignment, found {len(matches)}")
-        pins[var] = matches[0].group(1)
+        value = re.fullmatch(r'="([0-9a-f]{40})"[ \t]*', matches[0].group("assignment") or "")
+        if value is None:
+            raise ValueError(f"invalid {var} assignment")
+        pins[var] = value.group(1)
     return pins
 
 
@@ -87,15 +93,21 @@ def write_history(changes, path):
 
 
 def apply_pins(promoted):
-    with open(MAIN, "r", encoding="utf-8") as fh:
+    with open(MAIN, "r", encoding="utf-8", newline="") as fh:
         text = fh.read()
     replacements = []
     for key, sha in promoted.items():
-        pattern = re.compile(rf'^[ \t]*{re.escape(key)}="([0-9a-f]{{40}})"[ \t]*$', re.MULTILINE)
+        pattern = re.compile(
+            rf'^[ \t]*{re.escape(key)}(?P<assignment>[ \t]*=[^\r\n]*)?[ \t]*(?=\r?$)',
+            re.MULTILINE,
+        )
         matches = list(pattern.finditer(text))
         if len(matches) != 1:
             raise ValueError(f"expected exactly one {key} assignment, found {len(matches)}")
         match = matches[0]
+        value = re.fullmatch(r'="([0-9a-f]{40})"[ \t]*', match.group("assignment") or "")
+        if value is None:
+            raise ValueError(f"invalid {key} assignment")
         line = match.group(0)
         indentation = line[: len(line) - len(line.lstrip(" \t"))]
         trailing = line[len(line.rstrip(" \t")) :]
@@ -104,7 +116,7 @@ def apply_pins(promoted):
     for start, end, replacement in reversed(replacements):
         text = text[:start] + replacement + text[end:]
 
-    with open(MAIN, "w", encoding="utf-8") as fh:
+    with open(MAIN, "w", encoding="utf-8", newline="") as fh:
         fh.write(text)
     return True
 
