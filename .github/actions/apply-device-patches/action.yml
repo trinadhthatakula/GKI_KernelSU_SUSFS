@@ -23,12 +23,13 @@ runs:
         test -f "$PATCH" || { echo "Missing Samsung min_kdp patch: $PATCH" >&2; exit 1; }
         test -f "$MIN_KDP" || { echo "Missing Samsung min_kdp source: $MIN_KDP" >&2; exit 1; }
 
+        patch -p1 --dry-run < "$PATCH"
+
         SYMBOL_LIST=android/abi_gki_aarch64_galaxy
         echo "kdp_set_cred_non_rcu" >> $SYMBOL_LIST
         echo "kdp_usecount_dec_and_test" >> $SYMBOL_LIST
         echo "kdp_usecount_inc" >> $SYMBOL_LIST
 
-        patch -p1 --dry-run < "$PATCH"
         patch -p1 --no-backup-if-mismatch < "$PATCH"
         cp "$MIN_KDP" drivers/min_kdp.c
 
