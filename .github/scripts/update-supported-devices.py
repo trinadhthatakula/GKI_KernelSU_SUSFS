@@ -44,8 +44,10 @@ heading_map = {
     "Other": "## Other",
 }
 
-manufacturer = validate_cell("manufacturer", field("manufacturer") or "Other")
-custom_oem = validate_cell("custom_oem", field("custom_manufacturer").strip())
+manufacturer = field("manufacturer") or "Other"
+custom_oem = field("custom_manufacturer").strip()
+if manufacturer == "Other":
+    custom_oem = validate_cell("custom_oem", custom_oem)
 device = validate_cell("device", field("device").strip())
 codename = validate_cell("codename", field("codename").strip())
 gki = validate_cell("gki", field("gki_kernel").strip())
