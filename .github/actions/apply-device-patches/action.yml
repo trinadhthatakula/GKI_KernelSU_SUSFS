@@ -16,18 +16,25 @@ runs:
       shell: bash
       working-directory: ${{ github.workspace }}/kernel/common
       run: |
+        set -euo pipefail
+
+        PATCH="${{ github.workspace }}/kernel_patches/samsung/min_kdp/add-min_kdp-symbols.patch"
+        MIN_KDP="${{ github.workspace }}/kernel_patches/samsung/min_kdp/min_kdp.c"
+        test -f "$PATCH" || { echo "Missing Samsung min_kdp patch: $PATCH" >&2; exit 1; }
+        test -f "$MIN_KDP" || { echo "Missing Samsung min_kdp source: $MIN_KDP" >&2; exit 1; }
+
         SYMBOL_LIST=android/abi_gki_aarch64_galaxy
         echo "kdp_set_cred_non_rcu" >> $SYMBOL_LIST
         echo "kdp_usecount_dec_and_test" >> $SYMBOL_LIST
         echo "kdp_usecount_inc" >> $SYMBOL_LIST
 
-        PATCH="${{ github.workspace }}/kernel_patches/samsung/min_kdp/add-min_kdp-symbols.patch"
-        if patch -p1 --dry-run < "$PATCH"; then
-          patch -p1 --no-backup-if-mismatch < $PATCH
-        fi
+        patch -p1 --dry-run < "$PATCH"
+        patch -p1 --no-backup-if-mismatch < "$PATCH"
+        cp "$MIN_KDP" drivers/min_kdp.c
 
-        cp "${{ github.workspace }}/kernel_patches/samsung/min_kdp/min_kdp.c" drivers/min_kdp.c
-        echo "obj-y += min_kdp.o" >> drivers/Makefile
+        if ! grep -Fqx 'obj-y += min_kdp.o' drivers/Makefile; then
+          printf '%s\n' 'obj-y += min_kdp.o' >> drivers/Makefile
+        fi
 
     - name: Fix WiFi and Bluetooth on Xiaomi 6.6 GKI Devices
       if: inputs.version == 'android15-6.6'
