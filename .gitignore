@@ -5,6 +5,7 @@ kernels/
 bbr/
 __pycache__/
 
-# Local macOS metadata and agent worktrees
+# Local macOS metadata and agent state
 .DS_Store
 /.claude/worktrees/
+/.superpowers/
