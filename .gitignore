@@ -4,3 +4,7 @@ kernel-manifests/
 kernels/
 bbr/
 __pycache__/
+
+# Local macOS metadata and agent worktrees
+.DS_Store
+/.claude/worktrees/
