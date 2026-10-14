@@ -63,7 +63,11 @@ on:
         required: false
         type: string
         default: Wild
-      bypass:
+      keep_kmi:
+        required: false
+        type: boolean
+        default: false
+      allow_version_mismatch:
         required: false
         type: boolean
         default: false
@@ -72,16 +76,61 @@ on:
         required: false
         type: boolean
         default: true
+      page_size:
+        description: "ARM64 page size: 4k (default) or 16k (Kleaf --page_size)"
+        required: false
+        type: string
+        default: "4k"
+      stock_config_artifact:
+        description: "Artifact name with prefetched stock configs (stock_<kver>[_16k].config)"
+        required: false
+        type: string
+        default: ""
 
 jobs:
   build-gki:
     name: "${{ inputs.kernel_version }}.${{ inputs.sublevel }}-${{ inputs.android_version }}-${{ inputs.os_patch_level }} (${{ inputs.variant }})"
     runs-on: ubuntu-latest
     timeout-minutes: 120
-
+    concurrency:
+      # Must include every input that varies across matrix legs. Without
+      # sublevel/variant/page_size, several distinct builds collide on one key
+      # and, with cancel-in-progress: false, queue behind each other instead of
+      # running in parallel — one kernel compiles at a time.
+      group: build-${{ inputs.root_flavor }}-${{ inputs.android_version }}-${{ inputs.kernel_version }}.${{ inputs.sublevel }}-${{ inputs.os_patch_level }}-${{ inputs.variant }}${{ inputs.page_size }}
+      cancel-in-progress: false
     steps:
     - name: Checkout Repository
       uses: actions/checkout@v7
+
+    - name: Download Prefetched Stock Configs
+      if: inputs.stock_config_artifact != ''
+      continue-on-error: true
+      uses: actions/download-artifact@v7
+      with:
+        name: ${{ inputs.stock_config_artifact }}
+        path: stock-configs
+
+    - name: Validate Page Size
+      shell: bash
+      run: |
+        set -euo pipefail
+        PAGE_SIZE="${{ inputs.page_size }}"
+        case "$PAGE_SIZE" in
+          4k) exit 0 ;;
+          16k) ;;
+          *) echo "ERROR: unsupported page_size '$PAGE_SIZE' (expected 4k or 16k)." >&2; exit 1 ;;
+        esac
+        # Kleaf exposes --page_size only on the build branches used by these
+        # GKI families (main-kernel-build-2023/2024, main-kernel-2025).
+        case "${{ inputs.version }}" in
+          android14-6.1|android15-6.6|android16-6.12) ;;
+          *)
+            echo "ERROR: page_size=16k is not supported for ${{ inputs.version }}." >&2
+            echo "Supported families: android14-6.1, android15-6.6, android16-6.12." >&2
+            exit 1
+            ;;
+        esac
 
     - name: Emergency Disk Cleanup
       if: false
@@ -124,6 +173,13 @@ jobs:
         kernel_version: ${{ inputs.kernel_version }}
         os_patch_level: ${{ inputs.os_patch_level }}
 
+    - name: Spoof /proc/config.gz With Stock Config
+      uses: ./.github/actions/stock-config
+      with:
+        version: ${{ inputs.version }}
+        page_size: ${{ inputs.page_size }}
+        stock_config_dir: stock-configs
+
     - name: Set Build Timestamp from Kernel Commit
       shell: bash
       run: |
@@ -160,6 +216,7 @@ jobs:
         sublevel: ${{ inputs.sublevel }}
         os_patch_level: ${{ inputs.os_patch_level }}
         variant: ${{ inputs.variant }}
+        page_size: ${{ inputs.page_size }}
 
     - name: Kernel Fixes
       uses: ./.github/actions/kernel-fixes
@@ -195,8 +252,8 @@ jobs:
           echo "ROOT_COMMIT=N/A"
         } >> "$GITHUB_ENV"
 
-    - name: Disable SUSFS for ReSukiSU without SUSFS feature
-      if: inputs.root_flavor == 'resukisu' && !contains(inputs.feature_set, 'SUSFS')
+    - name: Disable SUSFS for BakaSU without SUSFS feature
+      if: inputs.root_flavor == 'bakasu' && !contains(inputs.feature_set, 'SUSFS')
       uses: ./.github/actions/set-kernel-config
       with:
         config_list: |
@@ -234,7 +291,7 @@ jobs:
         set -euo pipefail
         # KernelSU-Next (next) always uses the latest susfs4ksu gki branch tip so
         # SUSFS stays API-matched to the always-latest KernelSU-Next tree. All
-        # other roots (kernelsu, resukisu, sukisu-ultra) use the pinned
+        # other roots (kernelsu, bakasu, sukisu-ultra) use the pinned
         # verified SUSFS commit.
         if [ "${{ inputs.root_flavor }}" = "next" ]; then
           BRANCH="gki-${{ inputs.android_version }}-${{ inputs.kernel_version }}"
@@ -271,7 +328,7 @@ jobs:
             #   if (func) / if (func != NULL) both trigger -Werror:
             #     -Wpointer-bool-conversion  vs  -Wtautological-pointer-compare
             # For the function form,  &func != NULL  silences both (clang note).
-            # For the pointer form (resukisu/next/sukisu-ultra, no 10_enable) we want ptr != NULL.
+            # For the pointer form (bakasu/next/sukisu-ultra, no 10_enable) we want ptr != NULL.
             if grep -q "extern void security_dump_masked_av_fn" "$f"; then
               echo "[*] $f is extern-function form (10_enable applied), patching with &"
               sed -i 's/if (security_dump_masked_av_fn)/if (\&security_dump_masked_av_fn)/g' "$f"
@@ -289,7 +346,7 @@ jobs:
             fi
             # Next (and tiann without 10_enable fallback) declares the 3 helpers as
             # static on 6.6, but kernel hooks.c/selinuxfs.c reference them as extern
-            # after SUSFS (ReSukiSU uses __maybe_static -> global). Strip static so
+            # after SUSFS (BakaSU uses __maybe_static -> global). Strip static so
             # the linker can resolve security_context_to_sid_with_policy etc.
             if grep -q "^static int security_context_to_sid_with_policy" "$f"; then
               echo "[*] Stripping static from $f helpers (Next 6.6)"
@@ -404,6 +461,7 @@ jobs:
         version: ${{ inputs.version }}
         sublevel: ${{ steps.extract.outputs.sublevel }}
         brand_name: ${{ inputs.brand_name }}
+        keep_kmi: ${{ inputs.keep_kmi }}
 
     - name: Remove Protected Exports
       uses: ./.github/actions/remove-protected-exports
@@ -453,8 +511,8 @@ jobs:
       uses: ./.github/actions/cache-restore
       with:
         cache_path: /home/runner/.cache/bazel
-        cache_key: ${{ inputs.android_version }}-${{ inputs.kernel_version }}.${{ steps.extract.outputs.sublevel }}-${{ inputs.os_patch_level }}-${{ inputs.variant }}
-        cache_bucket: bazel-cache-${{ inputs.version }}-${{ inputs.variant }}
+        cache_key: ${{ inputs.android_version }}-${{ inputs.kernel_version }}.${{ steps.extract.outputs.sublevel }}-${{ inputs.os_patch_level }}-${{ inputs.variant }}${{ inputs.page_size == '16k' && '-16k' || '' }}
+        cache_bucket: bazel-cache-${{ inputs.version }}-${{ inputs.variant }}${{ inputs.page_size == '16k' && '-16k' || '' }}
         restore_keys: |
           ${{ inputs.android_version }}-${{ inputs.kernel_version }}.${{ steps.extract.outputs.sublevel }}-
 
@@ -497,19 +555,22 @@ jobs:
       run: touch "${{ github.workspace }}/wild_gki.fragment"
 
     - name: Apply Kernel Bypass Hack
-      if: ${{ inputs.bypass == 'true' }}
+      if: ${{ inputs.allow_version_mismatch == 'true' }}
       uses: ./.github/actions/bypass-kernel
       with:
         version: ${{ inputs.version }}
-        bypass: true
+        allow_version_mismatch: true
 
     - name: Build Normal Kernel
       env:
         SOURCE_DATE_EPOCH: ${{ env.SOURCE_DATE_EPOCH }}
         KBUILD_BUILD_TIMESTAMP: ${{ env.KBUILD_BUILD_TIMESTAMP }}
+        KBUILD_BUILD_USER: ${{ (inputs.version == 'android15-6.6' || inputs.version == 'android16-6.12') && 'kleaf' || 'build-user' }}
+        KBUILD_BUILD_HOST: build-host
       uses: ./.github/actions/build-kernel
       with:
         version: ${{ inputs.version }}
+        page_size: ${{ inputs.page_size }}
 
     - name: Get Cache Stats
       uses: ./.github/actions/cache-stats
@@ -544,19 +605,10 @@ jobs:
       if: always() && inputs.use_cache && (inputs.version == 'android14-5.15' || inputs.version == 'android14-6.1' || inputs.version == 'android15-6.6' || inputs.version == 'android16-6.12')
       with:
         cache_path: /home/runner/.cache/bazel
-        cache_key: ${{ inputs.android_version }}-${{ inputs.kernel_version }}.${{ steps.extract.outputs.sublevel }}-${{ inputs.os_patch_level }}-${{ inputs.variant }}
-        cache_bucket: "bazel-cache-${{ inputs.version }}-${{ inputs.variant }}"
+        cache_key: ${{ inputs.android_version }}-${{ inputs.kernel_version }}.${{ steps.extract.outputs.sublevel }}-${{ inputs.os_patch_level }}-${{ inputs.variant }}${{ inputs.page_size == '16k' && '-16k' || '' }}
+        cache_bucket: "bazel-cache-${{ inputs.version }}-${{ inputs.variant }}${{ inputs.page_size == '16k' && '-16k' || '' }}"
         compression_level: 9
         github_token: ${{ github.token }}
-
-    - name: Build Bypass Kernel
-      if: inputs.build_bypass
-      env:
-        SOURCE_DATE_EPOCH: ${{ env.SOURCE_DATE_EPOCH }}
-        KBUILD_BUILD_TIMESTAMP: ${{ env.KBUILD_BUILD_TIMESTAMP }}
-      uses: ./.github/actions/build-kernel
-      with:
-        version: ${{ inputs.version }}
 
     - name: Consolidated Build Summary
       if: always()
@@ -568,6 +620,9 @@ jobs:
           VARIANT="${{ inputs.variant }}"
           if [ -n "${VARIANT}" ] && [ "${VARIANT}" != "Normal" ]; then
             SUMMARY_BASE="${SUMMARY_BASE}-${VARIANT}"
+          fi
+          if [ "${{ inputs.page_size }}" = "16k" ]; then
+            SUMMARY_BASE="${SUMMARY_BASE}-16k"
           fi
         fi
         SUMMARY_FILE="/tmp/build-summary-${SUMMARY_BASE}.md"
@@ -645,6 +700,7 @@ jobs:
           echo "| **NoMount Commit** | ${NOMOUNT_SHA} |"
           echo "| **Feature Set** | ${{ inputs.feature_set }} |"
           echo "| **Variant** | ${{ inputs.variant }} |"
+          echo "| **Page Size** | ${{ inputs.page_size }} |"
           echo
           
           # Kernel Fixes
@@ -697,27 +753,45 @@ jobs:
           local page=1
           local match=""
           local page_file
+          local attempt
           page_file="$(mktemp)"
 
-          # Page through the artifacts API, checking each page for the exact
-          # artifact name. Uses a temp file for jq input (not argv) so large
-          # artifact lists can't exceed the OS argument-length limit.
-          while :; do
-            curl --fail --silent --show-error --location \
-              --header "Authorization: Bearer ${GH_TOKEN}" \
-              --header "X-GitHub-Api-Version: 2022-11-28" \
-              "${artifacts_api}&page=${page}" -o "$page_file"
+          # GitHub indexes an artifact asynchronously: the upload step can
+          # report "successfully finalized" and still not have the artifact in
+          # the run's list for a second or two. Retry the whole lookup before
+          # calling it missing, otherwise a just-uploaded artifact reads as
+          # absent and fails the step.
+          for attempt in 1 2 3 4 5 6; do
+            page=1
+            match=""
 
-            match="$(jq -r --arg name "$artifact_name" \
-              '[.artifacts[] | select(.name == $name and .expired == false)] | .[0]
-               | if . == null then "" else (.archive_download_url + "\t" + .digest) end' \
-              "$page_file")"
+            # Page through the artifacts API, checking each page for the exact
+            # artifact name. Uses a temp file for jq input (not argv) so large
+            # artifact lists can't exceed the OS argument-length limit.
+            while :; do
+              curl --fail --silent --show-error --location \
+                --retry 5 --retry-delay 3 --retry-all-errors --connect-timeout 30 \
+                --header "Authorization: Bearer ${GH_TOKEN}" \
+                --header "X-GitHub-Api-Version: 2022-11-28" \
+                "${artifacts_api}&page=${page}" -o "$page_file"
 
-            items="$(jq '(.artifacts | length) // 0' "$page_file")"
-            if [ "$items" -lt 100 ] || [ -n "$match" ]; then
+              match="$(jq -r --arg name "$artifact_name" \
+                '[.artifacts[] | select(.name == $name and .expired == false)] | .[0]
+                 | if . == null then "" else (.archive_download_url + "\t" + .digest) end' \
+                "$page_file")"
+
+              items="$(jq '(.artifacts | length) // 0' "$page_file")"
+              if [ "$items" -lt 100 ] || [ -n "$match" ]; then
+                break
+              fi
+              page=$((page + 1))
+            done
+
+            if [ -n "$match" ]; then
               break
             fi
-            page=$((page + 1))
+            echo "  artifact '$artifact_name' not listed yet (attempt ${attempt}/6); re-querying in 10s" >&2
+            sleep 10
           done
 
           rm -f "$page_file"
@@ -750,6 +824,7 @@ jobs:
           --arg nomount_commit "${NOMOUNT_COMMIT:-N/A}" \
           --arg android_branch "${{ inputs.android_version }}-${{ inputs.kernel_version }}-${{ inputs.os_patch_level }}" \
           --arg kmi "${{ inputs.android_version }}-${{ inputs.kernel_version }}" \
+          --arg page_size "${{ inputs.page_size }}" \
           --arg kernel_source_commit "${KERNEL_SOURCE_COMMIT:-N/A}" \
           --arg provenance_url "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
           --arg artifact_url "$kernel_artifact_url" \
@@ -774,6 +849,7 @@ jobs:
             nomount_commit: $nomount_commit,
             android_branch: $android_branch,
             kmi: $kmi,
+            page_size: $page_size,
             kernel_source_commit: $kernel_source_commit,
             provenance_url: $provenance_url,
             artifact_url: $artifact_url,

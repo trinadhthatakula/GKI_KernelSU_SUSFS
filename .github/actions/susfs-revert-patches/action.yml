@@ -100,6 +100,14 @@ runs:
           echo "Reverting task_mmu.c Android 16 6.12 Fake Patch"
           sed -i 's/vma_pages/vma_data_pages/g' fs/proc/task_mmu.c
         fi
+        # Undo the sublevel 92+ show_smaps_rollup reshape so the tree is back to
+        # the refactored proc_maps_locking_ctx / proc_get_vma() form the kernel
+        # actually builds with. The SUS_MAP guard the patch added is carried
+        # across; only the fake-patch scaffolding is removed.
+        if [ "${{ inputs.sublevel }}" -ge "92" ]; then
+          echo "Reverting task_mmu.c show_smaps_rollup reshape for 6.12 sublevel 92+"
+          python3 "${{ github.workspace }}/.github/scripts/susfs_fake_612.py" fs/proc/task_mmu.c revert
+        fi
 
     - name: Apply show_pad Fix
       shell: bash

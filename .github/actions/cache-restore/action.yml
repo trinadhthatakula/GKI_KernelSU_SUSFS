@@ -59,7 +59,7 @@ runs:
         fi
         
         echo "::group:: Fetching Asset List"
-        HTTP_RESPONSE=$(curl -sL -A "Mozilla/5.0" -w "%{http_code}" "$ASSETS_URL" -o assets.html || echo "404")
+        HTTP_RESPONSE=$(curl -sL -A "Mozilla/5.0" --retry 5 --retry-delay 3 --retry-all-errors --connect-timeout 30 -w "%{http_code}" "$ASSETS_URL" -o assets.html || echo "404")
         
         if [ "$HTTP_RESPONSE" -eq 200 ]; then
           ALL_ASSETS=$(grep -oP "download/$TAG_NAME/\K[^\"' ]+" assets.html | sort -u || echo "")
@@ -84,7 +84,9 @@ runs:
             [ -z "$KEY" ] && continue
             echo "::group:: Searching Prefix: $KEY"
             
-            MATCH=$(echo "$ALL_ASSETS" | grep "^cache-$KEY" | sort -r | head -n 1 || true)
+            # -V (version sort) so 2022-11 ranks above 2022-9. Plain sort -r
+            # is lexicographic and picks 2022-9 as "newest".
+            MATCH=$(echo "$ALL_ASSETS" | grep "^cache-$KEY" | sort -Vr | head -n 1 || true)
             
             if [ -z "$MATCH" ]; then
                 echo "Not found."

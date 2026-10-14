@@ -15,11 +15,15 @@ permissions:
 
 on:
   schedule:
-    - cron: '0 1 * * *'
+    - cron: '0 5 * * *'  # midnight EST (5am UTC)
   workflow_dispatch:
 
 jobs:
   sync-matrix:
+    # Fork gate (#328): cron runs need ENABLE_SCHEDULED_BUILDS=true (Actions
+    # variable). Forks inherit the workflow but not the variable, so their
+    # daily matrix-sync cron skips instead of opening PRs on the fork.
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'schedule' && vars.ENABLE_SCHEDULED_BUILDS == 'true')
     runs-on: ubuntu-latest
     steps:
       - name: Checkout main
@@ -84,34 +88,44 @@ jobs:
                   if MONTH.match(date) and date not in live and date not in deprecated:
                       print(f"NOTE: {version} {date}: head retired upstream, builds use latest tag")
 
+              version_added = False
               for month in sorted(live - have):
                   head = f"{version}-{month}"
                   tmp = tempfile.mkdtemp(prefix="newk-")
                   try:
+                      # --no-checkout, not --sparse: a sparse clone leaves the
+                      # working tree unpopulated, so reading Makefile off disk
+                      # raised FileNotFoundError while the clone itself exited 0.
+                      # Reading the blob straight from the object store avoids
+                      # the working tree entirely.
                       subprocess.run(
-                          ["git", "clone", "--filter=blob:none", "--sparse",
+                          ["git", "clone", "--filter=blob:none", "--no-checkout",
                            "--depth", "1", "--branch", head, COMMON_URL, tmp],
                           check=True, capture_output=True, timeout=600,
                       )
                       sub = None
-                      with open(os.path.join(tmp, "Makefile")) as f:
-                          for line in f:
-                              if line.startswith("SUBLEVEL ="):
-                                  sub = line.split("=", 1)[1].strip()
-                                  break
+                      r = subprocess.run(
+                          ["git", "-C", tmp, "show", "HEAD:Makefile"],
+                          check=True, capture_output=True, text=True, timeout=120,
+                      )
+                      for line in r.stdout.splitlines():
+                          if line.startswith("SUBLEVEL ="):
+                              sub = line.split("=", 1)[1].strip()
+                              break
                       if sub is None:
                           print(f"WARNING: no SUBLEVEL in {head}; skipping")
                           continue
                       cfg["include"].append({"sublevel": sub, "date": month})
                       added.append(f"{version} {month} (sublevel {sub})")
+                      version_added = True
                       print(f"ADD: {version} {month} (sublevel {sub})")
-                  except subprocess.CalledProcessError:
-                      print(f"WARNING: could not clone {head}; skipping")
+                  except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+                      print(f"WARNING: could not resolve {head} ({e}); skipping")
                       continue
                   finally:
                       shutil.rmtree(tmp, ignore_errors=True)
 
-              if any(a.startswith(version + " ") for a in added):
+              if version_added:
                   cfg["include"].sort(key=lambda e: e["date"])
                   with open(path, "w") as f:
                       json.dump(cfg, f, indent=2)

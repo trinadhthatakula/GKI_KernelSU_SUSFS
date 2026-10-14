@@ -140,6 +140,17 @@ runs:
           echo "Applying task_mmu.c Android 16 6.12 Fake Patch"
           sed -i 's/vma_data_pages/vma_pages/g' fs/proc/task_mmu.c
         fi
+        # Sublevel 92 (2026-09) and lts refactored show_smaps_rollup to use
+        # proc_maps_locking_ctx / proc_get_vma() / smap_gather_stats_range(),
+        # replacing the do { ... } for_each_vma loop the SUSFS patch is written
+        # against - including the "Case 4" partial-range block, whose work moved
+        # into smap_gather_stats_range(). Reshape it back so those two patch
+        # hunks apply. susfs-revert-patches restores the 92 form immediately
+        # after the patch, before anything is compiled.
+        if [ "${{ inputs.sublevel }}" -ge "92" ]; then
+          echo "Applying task_mmu.c show_smaps_rollup reshape for 6.12 sublevel 92+"
+          python3 "${{ github.workspace }}/.github/scripts/susfs_fake_612.py" fs/proc/task_mmu.c apply
+        fi
 
     - name: Apply Kernel SUSFS Patches
       shell: bash
