@@ -78,26 +78,47 @@ runs:
         fi
 
     - name: Export IPC symbols for module linkage
+      if: inputs.version == 'android16-6.12' || inputs.version == 'android17-6.18'
       shell: bash
-      if: inputs.version == 'android16-6.12'
-      working-directory: ${{ github.workspace }}/kernel
+      working-directory: ${{ github.workspace }}/kernel/common
       run: |
-        echo >> "${{ github.workspace }}/kernel/common/ipc/namespace.c"
-        echo 'EXPORT_SYMBOL_GPL(put_ipc_ns);' >> "${{ github.workspace }}/kernel/common/ipc/namespace.c"
-        echo >> "${{ github.workspace }}/kernel/common/ipc/msgutil.c"
-        echo 'EXPORT_SYMBOL_GPL(init_ipc_ns);' >> "${{ github.workspace }}/kernel/common/ipc/msgutil.c"
+        python3 "${{ github.workspace }}/.github/scripts/binder_ipc_ns_exports.py" "$PWD"
 
-    - name: Enable Kernel Configs
-      uses: ./.github/actions/set-kernel-config
-      with:
-        config_list: |
-          CONFIG_PID_NS=y
-          CONFIG_SYSVIPC=y
-          CONFIG_POSIX_MQUEUE=y
-          CONFIG_IPC_NS=y
-          CONFIG_DEVTMPFS=y
-          CONFIG_BINFMT_MISC=y
-          CONFIG_BINFMT_SCRIPT=y
-          CONFIG_BINFMT_ELF=y
-          CONFIG_USER_NS=y
+    - name: Apply the 6.18 SysV task-table port
+      # CONFIG_SYSVIPC adds two members to task_struct, and any change to that member
+      # list moves 6,329 of 9,741 modver CRCs - even when the bytes land at identical
+      # offsets. DroidSpaces relocate the members instead (reserve slots below 6.12, a
+      # 28-byte hole from 6.12 up); 6.18 has neither, so this port deletes the members
+      # outright and keeps the state in an xarray keyed by task pointer.
+      # Measured on android17-6.18: 0 of 9,741 symbols differ from stock.
+      if: false
+      shell: bash
+      working-directory: ${{ github.workspace }}/kernel/common
+      run: |
+        set -euo pipefail
+        P="${{ github.workspace }}/.github/patches/sysvipc-618/001-task-table.patch"
+        if grep -q 'sysv_task_state_get' ipc/sem.c; then
+          echo "task-table port already applied"
+          exit 0
+        fi
+        git apply -v "$P" || { echo "ERROR: the 6.18 SysV port did not apply" >&2; exit 1; }
+        grep -q 'sysv_task_state_get' ipc/sem.c || { echo "ERROR: port applied but sem.c unchanged" >&2; exit 1; }
+        echo "task-table port applied"
 
+    - name: Append the DS configs to the wild fragment
+      shell: bash
+      working-directory: ${{ github.workspace }}/kernel/common
+      run: |
+        set -euo pipefail
+        A="${{ github.workspace }}/.github/actions/droidspaces"
+        S="${{ github.workspace }}/.github/scripts/append_fragment.py"
+        python3 "$S" "$A/droidspaces_defconfig.fragment" --dest wild_defconfig.fragment --label droidspaces
+        # CONFIG_SYSVIPC is only free where task_struct can absorb it. On 6.18 that
+        # requires the SysV task-table port, which is disabled, so the IPC pair is
+        # appended everywhere else and skipped there - enabling it on 6.18 moved
+        # 6,388 exported-symbol CRCs (run 43743517821) and the ABI gate rejected it.
+        if [ "${{ inputs.version }}" = "android17-6.18" ]; then
+          echo "[-] 6.18: skipping the IPC fragment (SysV task-table port is disabled)"
+        else
+          python3 "$S" "$A/droidspaces-ipc.fragment" --dest wild_defconfig.fragment --label droidspaces-ipc
+        fi
