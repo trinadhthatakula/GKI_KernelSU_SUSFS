@@ -12,6 +12,7 @@ on:
         type: choice
         options:
           - CI
+          - Nightly
           - Pre-Release
           - Release
         default: CI
